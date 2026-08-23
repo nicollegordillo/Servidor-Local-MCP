@@ -1,0 +1,22 @@
+# Base de datos generada por db/seed.py
+db/*.db
+db/*.sqlite
+db/*.sqlite3
+
+# Bitacoras del servidor
+logs/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Editores y sistema operativo
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
