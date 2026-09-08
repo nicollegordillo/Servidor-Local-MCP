@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+logs/
+sandbox/
+capturas/
+db/*.db
+docs/
+examples/
+.git/
+.gitignore
+README.md
+chatbot.py
+mcp_client.py
+test_client.py
+servers_config.json
