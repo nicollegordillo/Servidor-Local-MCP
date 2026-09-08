@@ -9,6 +9,10 @@ language.
 **Project 1:** Use of an existing protocol
 **Author:** Nicolle Gordillo (22246)
 
+The repository contains the complete project: a host chatbot, an MCP client, the custom
+MCP server in both local (stdio) and remote (HTTP) form, and integration with the official
+Filesystem and Git MCP servers.
+
 > The JSON-RPC 2.0 message format, method routing and request/response correlation are
 > implemented **manually** with the Python standard library. No MCP SDK or helper
 > library (FastMCP, `mcp`, etc.) is used, as required by the assignment.
@@ -39,7 +43,7 @@ language.
 
 | # | Requirement | Where |
 |---|---|---|
-| 1 | LLM connection at API level | `chatbot.py` → `ClienteLLM`, raw HTTP with `urllib` (no SDK) |
+| 1 | LLM connection at API level | `llm_providers.py`, raw HTTP with `urllib` (no SDK). Gemini and Anthropic supported |
 | 2 | Session context | `Anfitrion.historial`, full history sent on every request |
 | 3 | Log of all MCP interactions | `BitacoraMCP`, live display + `/log` command + `logs/chatbot_mcp.log` |
 | 4 | Official Filesystem and Git MCP servers | `servers_config.json` |
@@ -164,11 +168,20 @@ listing, successful calls, business errors and protocol errors. If it ends with
 
 **4. Set your API key** (only needed for the chatbot)
 
-```bash
-export ANTHROPIC_API_KEY=sk-ant-...      # Linux / macOS
-set ANTHROPIC_API_KEY=sk-ant-...         # Windows cmd
-$env:ANTHROPIC_API_KEY="sk-ant-..."      # Windows PowerShell
+The host works with more than one LLM provider. Set the key for the one you want; the
+provider is auto-detected from whichever key is present.
+
+```powershell
+$env:GEMINI_API_KEY="..."                # Google Gemini — free tier
+$env:ANTHROPIC_API_KEY="sk-ant-..."      # Anthropic Claude
 ```
+
+```bash
+export GEMINI_API_KEY=...                # Linux / macOS
+```
+
+Get a Gemini key at [aistudio.google.com/apikey](https://aistudio.google.com/apikey).
+To force a provider or model: `--provider gemini --model gemini-2.0-flash`.
 
 **5. Optional — official MCP servers**
 
@@ -196,7 +209,8 @@ collisions between servers.
 | Option | Description |
 |---|---|
 | `--config PATH` | Server configuration file. Default `servers_config.json`. |
-| `--model NAME` | LLM model. Also settable via `ANTHROPIC_MODEL`. |
+| `--provider NAME` | `gemini` or `anthropic`. Auto-detected from the key in the environment. |
+| `--model NAME` | LLM model. Also settable via `LLM_MODEL`. |
 | `--quiet` | Hides the live MCP message feed. |
 | `--no-color` | Disables ANSI colors. |
 
@@ -510,12 +524,14 @@ The single **external source** is the Bank of Guatemala exchange-rate web servic
 
 ```
 mcp-inventario/
-├── chatbot.py                # HOST: LLM, context, MCP log, terminal UI
+├── chatbot.py                # HOST: context, MCP log, terminal UI
+├── llm_providers.py          # LLM providers (Gemini, Anthropic) — swappable
 ├── mcp_client.py             # CLIENT: manual JSON-RPC, stdio + HTTP transports
 ├── server.py                 # SERVER (local): protocol layer over stdio
 ├── server_http.py            # SERVER (remote): same protocol over HTTP
 ├── tools.py                  # Tool definitions and business logic (shared)
 ├── test_client.py            # Protocol walkthrough / smoke test
+├── test_llm.py               # Provider translation test (no API calls)
 ├── servers_config.json       # Which MCP servers the host connects to
 ├── Dockerfile                # Image for the remote deployment
 ├── .dockerignore
@@ -551,4 +567,7 @@ mcp-inventario/
 | Claude Desktop does not list the tools | The `args` path must be **absolute**, and `python3` must be on the system PATH. On Windows use `python` and escape backslashes. Restart the app after editing the config. |
 | `consulta_en_linea: false` in the conversion tool | The Bank of Guatemala service was unreachable (no internet, timeout or a firewall). The fallback rate was used; the returned figure is not the live rate. |
 | Stock keeps dropping between demos | `crear_pedido` really deducts inventory. Run `python3 db/seed.py` to reset the dataset. |
+| `credit balance is too low` | The Anthropic account has no credit. Switch provider: `--provider gemini`. |
+| `400` from Gemini mentioning an unknown schema field | Gemini accepts a subset of JSON Schema. `limpiar_esquema()` in `llm_providers.py` strips the unsupported keywords; add any new one to `CLAVES_NO_SOPORTADAS`. |
+| `404` model not found | The model identifier changed. Pass a current one with `--model`. |
 | `JSON invalido` (`-32700`) in the log | A line arrived that was not valid JSON, or a message was split across lines. Each message must occupy exactly one line. |

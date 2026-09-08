@@ -9,10 +9,11 @@ clientes (uno por servidor), agrega las herramientas de todos ellos y se
 las ofrece al LLM. Cuando el modelo decide usar una, el anfitrion la
 ejecuta contra el servidor correspondiente y le devuelve el resultado.
 
-FUNCIONALIDADES
+FUNCIONALIDADES (numeradas segun el enunciado)
 ----------------------------------------------
- 1) Conexion con el LLM a nivel de su API HTTP (Anthropic Messages API),
-    construida con urllib -- sin SDK.
+ 1) Conexion con el LLM a nivel de su API HTTP, construida con urllib --
+    sin SDK. El proveedor es intercambiable (Gemini o Anthropic); ver
+    llm_providers.py.
  2) Contexto de sesion: el historial completo viaja en cada peticion, de
     modo que las preguntas de seguimiento se resuelven correctamente.
  3) Bitacora de todas las interacciones con los servidores MCP, visible
@@ -25,9 +26,11 @@ con que argumentos. La ejecucion la realiza este anfitrion a traves del
 cliente MCP.
 
 Uso:
-    set ANTHROPIC_API_KEY=sk-ant-...        (Windows)
-    export ANTHROPIC_API_KEY=sk-ant-...     (Linux / macOS)
+    $env:GEMINI_API_KEY="..."       (Windows PowerShell)
+    export GEMINI_API_KEY=...       (Linux / macOS)
     python chatbot.py
+
+    python chatbot.py --provider anthropic     (para usar Claude)
 """
 
 import argparse
@@ -40,15 +43,14 @@ import urllib.request
 from datetime import datetime
 
 from mcp_client import MCPClient, MCPError, build_client
+from llm_providers import Resultado, crear_proveedor
 
 # ---------------------------------------------------------------------
 # Configuracion del LLM
 # ---------------------------------------------------------------------
-ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
-ANTHROPIC_VERSION = "2023-06-01"
-DEFAULT_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-5")
-MAX_TOKENS = 2000
-MAX_ITERACIONES_HERRAMIENTAS = 8   # tope de rondas de tool_use por turno
+# El proveedor concreto (Gemini, Anthropic, ...) se resuelve en
+# llm_providers.py. Aqui solo se fija el tope de rondas de herramientas.
+MAX_ITERACIONES_HERRAMIENTAS = 8
 
 SYSTEM_PROMPT = """Eres el asistente de Distribuidora El Quetzal, una distribuidora \
 mayorista de productos de consumo en Guatemala. Atiendes a clientes minoristas.
@@ -187,65 +189,20 @@ class BitacoraMCP:
 
 
 # =====================================================================
-# Cliente del LLM (requisito 1) - API HTTP directa, sin SDK
-# =====================================================================
-
-class ClienteLLM:
-    def __init__(self, api_key, modelo=DEFAULT_MODEL):
-        if not api_key:
-            raise RuntimeError(
-                "Falta la variable de entorno ANTHROPIC_API_KEY.\n"
-                "  Windows : set ANTHROPIC_API_KEY=sk-ant-...\n"
-                "  Linux/Mac: export ANTHROPIC_API_KEY=sk-ant-..."
-            )
-        self.api_key = api_key
-        self.modelo = modelo
-
-    def enviar(self, mensajes, herramientas=None, system=SYSTEM_PROMPT):
-        cuerpo = {
-            "model": self.modelo,
-            "max_tokens": MAX_TOKENS,
-            "system": system,
-            "messages": mensajes,
-        }
-        if herramientas:
-            cuerpo["tools"] = herramientas
-
-        peticion = urllib.request.Request(
-            ANTHROPIC_URL,
-            data=json.dumps(cuerpo, ensure_ascii=False).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "x-api-key": self.api_key,
-                "anthropic-version": ANTHROPIC_VERSION,
-            },
-            method="POST",
-        )
-
-        try:
-            with urllib.request.urlopen(peticion, timeout=120) as respuesta:
-                return json.loads(respuesta.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            detalle = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"Error HTTP {exc.code} de la API del LLM: {detalle[:400]}")
-        except urllib.error.URLError as exc:
-            raise RuntimeError(f"No se pudo contactar la API del LLM: {exc.reason}")
-
-
-# =====================================================================
 # Anfitrion
 # =====================================================================
 
 class Anfitrion:
     """Coordina los clientes MCP y el LLM."""
 
-    def __init__(self, config_path="servers_config.json", mostrar_log=True, modelo=DEFAULT_MODEL):
+    def __init__(self, config_path="servers_config.json", mostrar_log=True,
+                 proveedor=None, modelo=None):
         self.config_path = config_path
         self.bitacora = BitacoraMCP(mostrar_en_vivo=mostrar_log)
         self.clientes = {}                  # nombre -> MCPClient
         self.mapa_herramientas = {}         # nombre expuesto al LLM -> (cliente, tool)
         self.historial = []                 # contexto de la conversacion (requisito 2)
-        self.llm = ClienteLLM(os.environ.get("ANTHROPIC_API_KEY"), modelo)
+        self.llm = crear_proveedor(proveedor, modelo)
 
     # -- conexion a los servidores -------------------------------------
 
@@ -292,13 +249,13 @@ class Anfitrion:
               f"en {len(self.clientes)} servidores.")
 
     def herramientas_para_llm(self):
-        """Traduce el catalogo MCP al formato de herramientas de la API."""
+        """Catalogo MCP en formato neutral; cada proveedor lo traduce."""
         catalogo = []
         for expuesto, (cliente, herramienta) in self.mapa_herramientas.items():
             catalogo.append({
-                "name": expuesto,
-                "description": f"[{cliente.nombre}] {herramienta.get('description', '')}",
-                "input_schema": herramienta.get("inputSchema", {"type": "object", "properties": {}}),
+                "nombre": expuesto,
+                "descripcion": f"[{cliente.nombre}] {herramienta.get('description', '')}",
+                "esquema": herramienta.get("inputSchema", {"type": "object", "properties": {}}),
             })
         return catalogo
 
@@ -318,42 +275,35 @@ class Anfitrion:
 
     def procesar(self, entrada_usuario):
         """Un turno completo: puede requerir varias rondas de herramientas."""
-        self.historial.append({"role": "user", "content": entrada_usuario})
+        self.historial.append({"rol": "usuario", "texto": entrada_usuario})
         herramientas = self.herramientas_para_llm()
 
         for _ronda in range(MAX_ITERACIONES_HERRAMIENTAS):
-            respuesta = self.llm.enviar(self.historial, herramientas)
-            bloques = respuesta.get("content", [])
+            respuesta = self.llm.enviar(self.historial, herramientas, SYSTEM_PROMPT)
 
-            # El historial conserva la respuesta completa del modelo,
-            # incluidos los bloques tool_use (requisito 2: contexto).
-            self.historial.append({"role": "assistant", "content": bloques})
+            # El historial conserva el texto y las llamadas solicitadas,
+            # que es lo que mantiene el contexto entre turnos (requisito 2).
+            self.historial.append({
+                "rol": "asistente",
+                "texto": respuesta.texto,
+                "llamadas": respuesta.llamadas,
+            })
 
-            # Texto que el modelo produjo en esta ronda
-            for bloque in bloques:
-                if bloque.get("type") == "text" and bloque.get("text", "").strip():
-                    print(f"\n{C.BOLD}{C.VERDE}Asistente:{C.RESET} {bloque['text'].strip()}")
+            if respuesta.texto.strip():
+                print(f"\n{C.BOLD}{C.VERDE}Asistente:{C.RESET} {respuesta.texto.strip()}")
 
-            if respuesta.get("stop_reason") != "tool_use":
+            if respuesta.terminado:
                 return
 
-            # Ejecutar cada herramienta solicitada
+            # Ejecutar cada herramienta solicitada por el modelo
             resultados = []
-            for bloque in bloques:
-                if bloque.get("type") != "tool_use":
-                    continue
-
+            for llamada in respuesta.llamadas:
                 texto, hubo_error = self.ejecutar_herramienta(
-                    bloque["name"], bloque.get("input", {}))
+                    llamada.nombre, llamada.argumentos)
+                resultados.append(Resultado(llamada.id, llamada.nombre,
+                                            texto, hubo_error))
 
-                resultados.append({
-                    "type": "tool_result",
-                    "tool_use_id": bloque["id"],
-                    "content": texto,
-                    "is_error": hubo_error,
-                })
-
-            self.historial.append({"role": "user", "content": resultados})
+            self.historial.append({"rol": "herramienta", "resultados": resultados})
 
         print(f"{C.AMARILLO}  (se alcanzo el limite de rondas de herramientas){C.RESET}")
 
@@ -421,8 +371,11 @@ def main():
     parser = argparse.ArgumentParser(description="Chatbot anfitrion MCP.")
     parser.add_argument("--config", default="servers_config.json",
                         help="Archivo de configuracion de servidores.")
-    parser.add_argument("--model", default=DEFAULT_MODEL,
-                        help=f"Modelo del LLM. Por defecto {DEFAULT_MODEL}.")
+    parser.add_argument("--provider", default=None,
+                        help="Proveedor del LLM: gemini o anthropic. "
+                             "Por defecto se detecta segun la llave presente en el entorno.")
+    parser.add_argument("--model", default=None,
+                        help="Modelo del LLM. Por defecto el del proveedor elegido.")
     parser.add_argument("--quiet", action="store_true",
                         help="No muestra los mensajes MCP en vivo.")
     parser.add_argument("--no-color", action="store_true",
@@ -435,14 +388,15 @@ def main():
     print(BANNER)
 
     try:
-        anfitrion = Anfitrion(args.config, mostrar_log=not args.quiet, modelo=args.model)
+        anfitrion = Anfitrion(args.config, mostrar_log=not args.quiet,
+                              proveedor=args.provider, modelo=args.model)
         anfitrion.conectar_servidores()
     except Exception as exc:
         print(f"\n{C.ROJO}No se pudo iniciar: {exc}{C.RESET}")
         sys.exit(1)
 
     print(AYUDA)
-    print(f"\n{C.GRIS}Modelo: {args.model}{C.RESET}")
+    print(f"\n{C.GRIS}LLM: {anfitrion.llm.nombre} · modelo {anfitrion.llm.modelo}{C.RESET}")
 
     try:
         while True:
