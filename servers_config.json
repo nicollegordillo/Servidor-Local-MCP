@@ -1,0 +1,43 @@
+{
+  "_comentario": [
+    "Configuracion de los servidores MCP que usa el chatbot anfitrion.",
+    "Cada entrada define un transporte: 'stdio' (subproceso local) o 'http' (remoto).",
+    "Ponga 'disabled': true para omitir un servidor sin borrar su configuracion.",
+    "Los servidores oficiales requieren Node.js (npx) y uv (uvx) instalados."
+  ],
+
+  "mcpServers": {
+
+    "distribuidora": {
+      "_descripcion": "Servidor propio, caso de uso de industria (punto 5). Local, stdio.",
+      "transport": "stdio",
+      "command": "python",
+      "args": ["server.py"]
+    },
+
+    "distribuidora_remoto": {
+      "_descripcion": "El mismo servidor desplegado en la nube (punto 6). Remoto, HTTP.",
+      "_nota": "Reemplace la URL por la de su servicio en Cloud Run y quite 'disabled'.",
+      "transport": "http",
+      "url": "https://SU-SERVICIO.run.app/mcp",
+      "timeout": 30,
+      "disabled": true
+    },
+
+    "filesystem": {
+      "_descripcion": "Servidor oficial de sistema de archivos (punto 4).",
+      "_nota": "El ultimo argumento es el directorio al que se le permite acceder.",
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "./sandbox"]
+    },
+
+    "git": {
+      "_descripcion": "Servidor oficial de Git (punto 4).",
+      "_nota": "Requiere uv instalado. El repositorio debe existir antes de conectarse.",
+      "transport": "stdio",
+      "command": "uvx",
+      "args": ["mcp-server-git", "--repository", "./sandbox/demo-repo"]
+    }
+  }
+}
