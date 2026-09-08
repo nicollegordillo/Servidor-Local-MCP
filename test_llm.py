@@ -30,10 +30,13 @@ def falso_post(url, cuerpo, cabeceras, etiqueta):
             return {"candidates": [{"content": {"role": "model", "parts": [
                 {"text": "Si, hay 318 cajas en Bodega Central."}]},
                 "finishReason": "STOP"}]}
+        # Los modelos Gemini 3.x adjuntan thoughtSignature a la parte
+        # functionCall y exigen recibirla de vuelta en el historial.
         return {"candidates": [{"content": {"role": "model", "parts": [
             {"text": "Déjame revisar el inventario."},
             {"functionCall": {"name": "distribuidora__consultar_stock",
-                              "args": {"sku": "AB-0009"}}}]},
+                              "args": {"sku": "AB-0009"}},
+             "thoughtSignature": "FIRMA_DE_PRUEBA_12345"}]},
             "finishReason": "STOP"}]}
 
     tiene_resultado = any(
@@ -124,7 +127,8 @@ def probar(proveedor, titulo):
               f"{json.dumps(declaracion['parameters']['properties']['bodega_id'], ensure_ascii=False)}")
 
     # --- El anfitrion ejecuta y devuelve el resultado
-    historial.append({"rol": "asistente", "texto": r1.texto, "llamadas": r1.llamadas})
+    historial.append({"rol": "asistente", "texto": r1.texto,
+                      "llamadas": r1.llamadas, "crudo": r1.crudo})
     historial.append({"rol": "herramienta", "resultados": [
         lp.Resultado(r1.llamadas[0].id, r1.llamadas[0].nombre,
                      '{"total_disponible": 318}', False)]})
@@ -132,6 +136,13 @@ def probar(proveedor, titulo):
     # --- Vuelta 2: el modelo responde con el dato
     r2 = proveedor.enviar(historial, HERRAMIENTAS, "Eres un asistente.")
     print(f"  respuesta final: {r2.texto!r}  (terminado={r2.terminado})")
+
+    if proveedor.nombre == "gemini":
+        enviado = json.dumps(capturado["cuerpo"])
+        assert "thoughtSignature" in enviado, \
+            "La thoughtSignature no se reenvio; Gemini 3.x devolveria HTTP 400"
+        assert "FIRMA_DE_PRUEBA_12345" in enviado, "La firma llego alterada"
+        print("  thoughtSignature: reenviada intacta en el historial")
 
     print("\n  --- Cuerpo enviado en la vuelta 2 (extracto) ---")
     print("  " + json.dumps(capturado["cuerpo"], ensure_ascii=False,

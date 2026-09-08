@@ -57,10 +57,15 @@ class Resultado:
 
 
 class RespuestaLLM:
-    def __init__(self, texto, llamadas, terminado):
+    def __init__(self, texto, llamadas, terminado, crudo=None):
         self.texto = texto              # texto visible para el usuario
         self.llamadas = llamadas        # lista de Llamada
         self.terminado = terminado      # True si no pide herramientas
+        # Representacion original de la respuesta, tal como la devolvio el
+        # proveedor. Algunos modelos (Gemini 3.x) exigen que ciertas
+        # partes se reenvien intactas en el historial, asi que se guardan
+        # sin interpretarlas. Formato: {"proveedor": str, "partes": [...]}
+        self.crudo = crudo
 
 
 # =====================================================================
@@ -290,6 +295,16 @@ class ProveedorGemini(ProveedorLLM):
                                    "parts": [{"text": entrada["texto"]}]})
 
             elif rol == "asistente":
+                # Los modelos Gemini 3.x acompanan cada functionCall con
+                # una `thoughtSignature` que debe devolverse intacta en el
+                # historial; si falta, la API responde 400. Por eso se
+                # reenvian las partes originales tal como llegaron, en
+                # lugar de reconstruirlas a partir del formato neutral.
+                crudo = entrada.get("crudo")
+                if crudo and crudo.get("proveedor") == self.nombre and crudo.get("partes"):
+                    contenidos.append({"role": "model", "parts": crudo["partes"]})
+                    continue
+
                 partes = []
                 if entrada.get("texto"):
                     partes.append({"text": entrada["texto"]})
@@ -361,6 +376,7 @@ class ProveedorGemini(ProveedorLLM):
             texto="\n".join(t for t in textos if t.strip()),
             llamadas=llamadas,
             terminado=not llamadas,
+            crudo={"proveedor": self.nombre, "partes": partes},
         )
 
 

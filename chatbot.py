@@ -283,10 +283,13 @@ class Anfitrion:
 
             # El historial conserva el texto y las llamadas solicitadas,
             # que es lo que mantiene el contexto entre turnos (requisito 2).
+            # `crudo` guarda la respuesta tal como la devolvio el proveedor,
+            # necesaria para modelos que exigen reenviarla sin alterar.
             self.historial.append({
                 "rol": "asistente",
                 "texto": respuesta.texto,
                 "llamadas": respuesta.llamadas,
+                "crudo": respuesta.crudo,
             })
 
             if respuesta.texto.strip():
