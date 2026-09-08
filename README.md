@@ -17,18 +17,39 @@ language.
 
 ## Table of contents
 
+- [Implemented features](#implemented-features)
 - [Use case](#use-case)
 - [Architecture](#architecture)
 - [Requirements](#requirements)
 - [Installation](#installation)
-- [Running the server](#running-the-server)
-- [Connecting the server to a host](#connecting-the-server-to-a-host)
+- [Running the chatbot](#running-the-chatbot)
+- [Running the server standalone](#running-the-server-standalone)
+- [Remote server](#remote-server)
+- [Connecting the server to another host](#connecting-the-server-to-another-host)
 - [Tool specification](#tool-specification)
 - [Protocol specification](#protocol-specification)
 - [Usage examples](#usage-examples)
 - [Data sources](#data-sources)
 - [Project structure](#project-structure)
 - [Troubleshooting](#troubleshooting)
+
+---
+
+## Implemented features
+
+| # | Requirement | Where |
+|---|---|---|
+| 1 | LLM connection at API level | `chatbot.py` → `ClienteLLM`, raw HTTP with `urllib` (no SDK) |
+| 2 | Session context | `Anfitrion.historial`, full history sent on every request |
+| 3 | Log of all MCP interactions | `BitacoraMCP`, live display + `/log` command + `logs/chatbot_mcp.log` |
+| 4 | Official Filesystem and Git MCP servers | `servers_config.json` |
+| 5 | Custom local MCP server (industry use case) | `server.py` + `tools.py` |
+| 6 | Same server running remotely | `server_http.py` + `Dockerfile` → Cloud Run |
+| 7 | Wireshark traffic analysis | `docs/analisis_wireshark.md` |
+| — | Terminal UI (extra credit) | `chatbot.py`, ANSI colors, structured layout, commands |
+
+The JSON-RPC layer is written by hand on both sides — server (`server.py`) and client
+(`mcp_client.py`) — as required.
 
 ---
 
@@ -49,34 +70,38 @@ reporting a real part of the implementation rather than a formality.
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────┐
-│  HOST — chatbot (console / web)              │
-│  ┌────────────────────────────────────────┐  │
-│  │  MCP client                            │  │
-│  └────────────────┬───────────────────────┘  │
-└───────────────────┼──────────────────────────┘
-                    │  JSON-RPC 2.0 over stdio
-                    │  (newline-delimited messages)
-┌───────────────────▼──────────────────────────┐
-│  MCP SERVER — server.py                      │
-│    · protocol layer (JSON-RPC framing)       │
-│    · dispatch by `method`                    │
-│  ┌────────────────────────────────────────┐  │
-│  │  tools.py — business logic             │  │
-│  └────────────────┬───────────────────────┘  │
-└───────────────────┼──────────────────────────┘
-                    │
-        ┌───────────┴────────────┐
-        ▼                        ▼
-┌───────────────┐      ┌────────────────────┐
-│ SQLite        │      │ Banco de Guatemala │
-│ distribuidora │      │ exchange-rate API  │
-└───────────────┘      └────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│  HOST — chatbot.py                                          │
+│    · Anthropic Messages API (urllib, no SDK)                │
+│    · conversation context · MCP interaction log             │
+│  ┌───────────────────────────────────────────────────────┐  │
+│  │  MCP CLIENTS — mcp_client.py (manual JSON-RPC 2.0)    │  │
+│  └───┬───────────────┬───────────────┬───────────────┬───┘  │
+└──────┼───────────────┼───────────────┼───────────────┼──────┘
+       │ stdio         │ stdio         │ stdio         │ HTTP
+       ▼               ▼               ▼               ▼
+┌─────────────┐ ┌─────────────┐ ┌─────────────┐ ┌──────────────┐
+│ server.py   │ │ Filesystem  │ │ Git         │ │server_http.py│
+│ (local)     │ │ (official)  │ │ (official)  │ │ (Cloud Run)  │
+└──────┬──────┘ └─────────────┘ └─────────────┘ └──────┬───────┘
+       │                                               │
+       └──────────────► tools.py ◄─────────────────────┘
+                      (business logic,
+                       shared unchanged)
+                            │
+                ┌───────────┴────────────┐
+                ▼                        ▼
+        ┌───────────────┐      ┌────────────────────┐
+        │ SQLite        │      │ Banco de Guatemala │
+        │ distribuidora │      │ exchange-rate API  │
+        └───────────────┘      └────────────────────┘
 ```
 
 `server.py` holds only the protocol; `tools.py` holds only the business logic. The
-separation is deliberate: the remote version of this server (part 2 of the project)
-reuses `tools.py` unchanged and swaps stdio for HTTP.
+separation is deliberate: `server_http.py` imports `process_message` from `server.py` and
+reuses `tools.py` **without a single change** — the only thing that differs between the
+local and the remote server is the transport. The same symmetry exists on the client side:
+`MCPClient` is identical for both, and only the transport object changes.
 
 ---
 
@@ -137,9 +162,68 @@ listing, successful calls, business errors and protocol errors. If it ends with
 > To regenerate the database from scratch at any point (for example after a demo that
 > created orders), just run `python3 db/seed.py` again — it drops and rebuilds everything.
 
+**4. Set your API key** (only needed for the chatbot)
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...      # Linux / macOS
+set ANTHROPIC_API_KEY=sk-ant-...         # Windows cmd
+$env:ANTHROPIC_API_KEY="sk-ant-..."      # Windows PowerShell
+```
+
+**5. Optional — official MCP servers**
+
+The Filesystem and Git servers are launched on demand by `npx` and `uvx`, so they need
+[Node.js](https://nodejs.org) and [uv](https://docs.astral.sh/uv/) installed. If you don't
+have them, set `"disabled": true` on those entries in `servers_config.json`; everything
+else still works.
+
+```bash
+mkdir -p sandbox/demo-repo && git -C sandbox/demo-repo init
+```
+
 ---
 
-## Running the server
+## Running the chatbot
+
+```bash
+python3 chatbot.py
+```
+
+The chatbot connects to every server declared in `servers_config.json`, aggregates their
+tools and offers them to the model. Tool names are namespaced as `server__tool` to avoid
+collisions between servers.
+
+| Option | Description |
+|---|---|
+| `--config PATH` | Server configuration file. Default `servers_config.json`. |
+| `--model NAME` | LLM model. Also settable via `ANTHROPIC_MODEL`. |
+| `--quiet` | Hides the live MCP message feed. |
+| `--no-color` | Disables ANSI colors. |
+
+In-session commands:
+
+| Command | Description |
+|---|---|
+| `/tools` | Lists available tools grouped by server. |
+| `/servers` | Connection status and ping per server. |
+| `/log` | Recent MCP interactions (`/log todo` for full messages). |
+| `/quiet` | Toggles the live message feed. |
+| `/reset` | Clears the conversation context. |
+| `/salir` | Ends the session. |
+
+Things worth trying:
+
+```
+¿Tienen aceite vegetal disponible?
+Soy el cliente 3, quiero 10 cajas de ese aceite
+¿Cuánto sería en dólares?
+¿Quién fue Alan Turing?        ← general question, no tools
+¿En qué fecha nació?           ← follow-up, proves context is kept
+```
+
+---
+
+## Running the server standalone
 
 The server communicates over **stdin/stdout**, so running it directly leaves it waiting
 for JSON-RPC messages on standard input. That is the expected behaviour: the host process
@@ -170,6 +254,43 @@ echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python3 server.py --log-
 
 > **Important:** stdout is reserved exclusively for protocol messages. All logging goes to
 > stderr and to the log file. Printing anything else to stdout would corrupt the stream.
+
+---
+
+## Remote server
+
+The same server, deployed to the cloud over HTTP. `server_http.py` imports the protocol
+layer from `server.py` and the business logic from `tools.py` without modifying either —
+only the transport changes.
+
+Run it locally first:
+
+```bash
+python3 server_http.py --port 8080 --verbose
+```
+
+```bash
+curl http://localhost:8080/health
+curl -X POST http://localhost:8080/mcp -H "Content-Type: application/json" \
+     -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+```
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/mcp` | POST | JSON-RPC message in, JSON-RPC message out. Notifications get `202` with no body. |
+| `/mcp` | DELETE | Closes the session identified by `Mcp-Session-Id`. |
+| `/health` | GET | Health check for the cloud load balancer. |
+| `/` | GET | Server info and tool names. |
+
+Deploy to Cloud Run:
+
+```bash
+gcloud run deploy mcp-distribuidora --source . --region us-central1 --allow-unauthenticated
+```
+
+Then set the returned URL in `servers_config.json` under `distribuidora_remoto` and remove
+`"disabled": true`. Full instructions, including troubleshooting and the caveat about
+ephemeral storage, are in [`docs/despliegue_cloud_run.md`](docs/despliegue_cloud_run.md).
 
 ---
 
@@ -389,19 +510,34 @@ The single **external source** is the Bank of Guatemala exchange-rate web servic
 
 ```
 mcp-inventario/
-├── server.py                 # MCP server: manual JSON-RPC 2.0 over stdio
-├── tools.py                  # Tool definitions (JSON Schema) and business logic
-├── test_client.py            # Test client: full protocol walkthrough
+├── chatbot.py                # HOST: LLM, context, MCP log, terminal UI
+├── mcp_client.py             # CLIENT: manual JSON-RPC, stdio + HTTP transports
+├── server.py                 # SERVER (local): protocol layer over stdio
+├── server_http.py            # SERVER (remote): same protocol over HTTP
+├── tools.py                  # Tool definitions and business logic (shared)
+├── test_client.py            # Protocol walkthrough / smoke test
+├── servers_config.json       # Which MCP servers the host connects to
+├── Dockerfile                # Image for the remote deployment
+├── .dockerignore
+├── .gitignore
+├── README.md
+│
 ├── db/
 │   ├── schema.sql            # Relational schema
 │   ├── seed.py               # Synthetic data generator (fixed seed)
-│   └── distribuidora.db      # Generated — not tracked in git
+│   └── distribuidora.db      # Generated — not tracked
+│
+├── docs/
+│   ├── despliegue_cloud_run.md   # Deployment guide (part 6)
+│   └── analisis_wireshark.md     # Capture and layer analysis guide (parts 7 and 9)
+│
 ├── examples/
-│   ├── ejemplos_de_uso.md    # Annotated transcript and sample conversations
+│   ├── ejemplos_de_uso.md    # Annotated transcript and scenarios
 │   └── claude_desktop_config.json
-├── logs/                     # Generated — not tracked in git
-├── .gitignore
-└── README.md
+│
+├── sandbox/                  # Working area for the Filesystem and Git servers
+├── capturas/                 # Wireshark .pcapng files
+└── logs/                     # Generated — not tracked
 ```
 
 ---
