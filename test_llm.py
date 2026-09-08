@@ -69,6 +69,37 @@ HERRAMIENTAS = [{
 }]
 
 
+def validar_esquema_gemini(esquema, ruta="parameters"):
+    """Reproduce las validaciones que aplica Gemini y que provocan HTTP 400.
+
+    Sin esto, la prueba con un servidor simulado aceptaria cualquier
+    esquema y no detectaria los rechazos reales de la API.
+    """
+    fallos = []
+    if isinstance(esquema, dict):
+        for clave in esquema:
+            if clave in lp.CLAVES_NO_SOPORTADAS:
+                fallos.append(f"{ruta}: clave no soportada '{clave}'")
+
+        valores = esquema.get("enum")
+        if valores is not None:
+            if esquema.get("type") != "string":
+                fallos.append(f"{ruta}.enum: enum sobre type='{esquema.get('type')}' "
+                              f"(Gemini solo admite enum en cadenas)")
+            for i, valor in enumerate(valores):
+                if not isinstance(valor, str):
+                    fallos.append(f"{ruta}.enum[{i}]: valor no textual {valor!r}")
+
+        for clave, valor in esquema.items():
+            fallos.extend(validar_esquema_gemini(valor, f"{ruta}.{clave}"))
+
+    elif isinstance(esquema, list):
+        for i, elemento in enumerate(esquema):
+            fallos.extend(validar_esquema_gemini(elemento, f"{ruta}[{i}]"))
+
+    return fallos
+
+
 def probar(proveedor, titulo):
     print(f"\n{'=' * 68}\n{titulo}\n{'=' * 68}")
     historial = [{"rol": "usuario", "texto": "¿Tienen aceite vegetal?"}]
@@ -80,11 +111,17 @@ def probar(proveedor, titulo):
     print(f"  llamadas      : {[(l.nombre, l.argumentos) for l in r1.llamadas]}")
     print(f"  terminado     : {r1.terminado}")
 
-    esquema_enviado = json.dumps(capturado["cuerpo"])
-    prohibidas = [k for k in lp.CLAVES_NO_SOPORTADAS if f'"{k}"' in esquema_enviado]
     if proveedor.nombre == "gemini":
-        print(f"  claves no soportadas en el cuerpo: {prohibidas or 'ninguna'}")
-        assert not prohibidas, f"El esquema aun contiene {prohibidas}"
+        declaracion = capturado["cuerpo"]["tools"][0]["functionDeclarations"][0]
+        fallos = validar_esquema_gemini(declaracion["parameters"])
+        if fallos:
+            print("  esquema RECHAZADO por Gemini:")
+            for f in fallos:
+                print(f"    - {f}")
+            raise AssertionError("El esquema enviado no es valido para Gemini")
+        print("  esquema        : valido para Gemini")
+        print(f"  bodega_id      : "
+              f"{json.dumps(declaracion['parameters']['properties']['bodega_id'], ensure_ascii=False)}")
 
     # --- El anfitrion ejecuta y devuelve el resultado
     historial.append({"rol": "asistente", "texto": r1.texto, "llamadas": r1.llamadas})

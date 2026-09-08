@@ -204,9 +204,17 @@ CLAVES_NO_SOPORTADAS = {
 def limpiar_esquema(esquema):
     """Adapta un JSON Schema de MCP al subconjunto que acepta Gemini.
 
-    Se recorre el esquema completo y se retiran las palabras clave no
-    soportadas. La informacion util para el modelo (tipos, descripciones,
-    campos requeridos, enumeraciones) se conserva intacta.
+    Dos ajustes son necesarios:
+
+    1. Retirar las palabras clave que Gemini no reconoce; su presencia
+       hace que rechace la peticion completa con HTTP 400.
+
+    2. Gemini solo admite `enum` en campos de tipo string. Un enum
+       numerico (por ejemplo bodega_id con [1, 2, 3]) provoca el error
+       "Invalid value at ... enum[0] (TYPE_STRING)". En esos casos se
+       retira el enum y los valores permitidos se trasladan a la
+       descripcion, de modo que el modelo conserve la informacion aunque
+       ya no este validada por el esquema.
     """
     if isinstance(esquema, dict):
         limpio = {}
@@ -214,6 +222,20 @@ def limpiar_esquema(esquema):
             if clave in CLAVES_NO_SOPORTADAS:
                 continue
             limpio[clave] = limpiar_esquema(valor)
+
+        # Enum solo se admite sobre cadenas.
+        valores = limpio.get("enum")
+        if valores is not None and limpio.get("type") != "string":
+            if all(isinstance(v, str) for v in valores):
+                limpio["type"] = "string"
+            else:
+                limpio.pop("enum")
+                listado = ", ".join(str(v) for v in valores)
+                descripcion = limpio.get("description", "").rstrip()
+                separador = " " if descripcion and not descripcion.endswith(".") else ""
+                limpio["description"] = (
+                    f"{descripcion}{separador} Valores permitidos: {listado}.".strip())
+
         # Gemini exige que un objeto declare 'properties'.
         if limpio.get("type") == "object" and "properties" not in limpio:
             limpio["properties"] = {}
@@ -240,7 +262,10 @@ class ProveedorGemini(ProveedorLLM):
 
     nombre = "gemini"
     BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
-    MODELO_POR_DEFECTO = "gemini-2.0-flash"
+    # Los identificadores de modelo cambian con el tiempo; si la API
+    # responde 404 indicando que el modelo ya no existe, el mensaje de
+    # error nombra el sustituto. Tambien puede pasarse con --model.
+    MODELO_POR_DEFECTO = "gemini-3.6-flash"
 
     def __init__(self, api_key, modelo=None):
         if not api_key:
