@@ -9,7 +9,7 @@ clientes (uno por servidor), agrega las herramientas de todos ellos y se
 las ofrece al LLM. Cuando el modelo decide usar una, el anfitrion la
 ejecuta contra el servidor correspondiente y le devuelve el resultado.
 
-FUNCIONALIDADES (numeradas segun el enunciado)
+FUNCIONALIDADES
 ----------------------------------------------
  1) Conexion con el LLM a nivel de su API HTTP (Anthropic Messages API),
     construida con urllib -- sin SDK.
