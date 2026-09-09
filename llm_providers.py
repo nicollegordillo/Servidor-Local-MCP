@@ -26,11 +26,52 @@ solicitadas y si el turno termino.
 
 import json
 import os
+import re
+import time
 import urllib.error
 import urllib.request
 
 TIMEOUT = 120
 MAX_TOKENS = 2000
+
+# Codigos HTTP que indican una falla temporal del proveedor y no un error
+# en la peticion: saturacion del servicio (503), limite de peticiones por
+# minuto (429) y errores internos (500, 502, 504). Ante estos conviene
+# reintentar en lugar de abortar el turno.
+CODIGOS_TRANSITORIOS = {429, 500, 502, 503, 504}
+REINTENTOS = 3
+ESPERA_BASE = 2.0        # segundos; se duplica en cada intento
+ESPERA_MAXIMA = 70.0     # tope para la espera sugerida por el proveedor
+
+
+def _espera_sugerida(detalle):
+    """Extrae del cuerpo del error cuantos segundos pide esperar la API.
+
+    Al superar la cuota, los proveedores indican el tiempo de reintento.
+    Gemini lo expone de dos formas: como campo `retryDelay` ("25s") en los
+    detalles estructurados del error, y como texto dentro del mensaje
+    ("Please retry in 25.26s"). La unidad varia entre segundos y
+    milisegundos segun cuanto falte para que se renueve la cuota, asi que
+    ambas se contemplan. Respetar ese valor evita reintentar antes de
+    tiempo y volver a recibir el mismo rechazo.
+    """
+    for patron in (r'"retryDelay"\s*:\s*"([\d.]+)(ms|s)"',
+                   r"retry in ([\d.]+)\s*(ms|s)"):
+        encontrado = re.search(patron, detalle, re.IGNORECASE)
+        if not encontrado:
+            continue
+        try:
+            valor = float(encontrado.group(1))
+        except ValueError:
+            continue
+
+        if encontrado.group(2).lower() == "ms":
+            valor /= 1000.0
+
+        # Un segundo extra de margen sobre lo que pide la API.
+        return min(valor + 1.0, ESPERA_MAXIMA)
+
+    return None
 
 
 # =====================================================================
@@ -73,21 +114,64 @@ class RespuestaLLM:
 # =====================================================================
 
 def _post_json(url, cuerpo, cabeceras, etiqueta):
-    """POST con cuerpo JSON. Devuelve la respuesta ya deserializada."""
+    """POST con cuerpo JSON. Devuelve la respuesta ya deserializada.
+
+    Ante fallas temporales del proveedor (saturacion, limite de tasa) se
+    reintenta con espera creciente. Los errores de la peticion en si
+    (400, 401, 404) no se reintentan porque volverian a fallar igual.
+    """
     peticion = urllib.request.Request(
         url,
         data=json.dumps(cuerpo, ensure_ascii=False).encode("utf-8"),
         headers=cabeceras,
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(peticion, timeout=TIMEOUT) as respuesta:
-            return json.loads(respuesta.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        detalle = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"Error HTTP {exc.code} de {etiqueta}: {detalle[:500]}")
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"No se pudo contactar {etiqueta}: {exc.reason}")
+
+    espera = ESPERA_BASE
+    for intento in range(1, REINTENTOS + 1):
+        try:
+            with urllib.request.urlopen(peticion, timeout=TIMEOUT) as respuesta:
+                return json.loads(respuesta.read().decode("utf-8"))
+
+        except urllib.error.HTTPError as exc:
+            detalle = exc.read().decode("utf-8", errors="replace")
+
+            if exc.code in CODIGOS_TRANSITORIOS and intento < REINTENTOS:
+                sugerida = _espera_sugerida(detalle)
+                demora = sugerida if sugerida is not None else espera
+
+                if exc.code == 429:
+                    motivo = "cuota o limite de peticiones agotado"
+                else:
+                    motivo = "servicio saturado"
+
+                print(f"  ({etiqueta}: {motivo}, HTTP {exc.code}. "
+                      f"Reintento {intento} de {REINTENTOS - 1} en {demora:.0f} s...)")
+                time.sleep(demora)
+                espera *= 2
+                continue
+
+            if exc.code == 429:
+                raise RuntimeError(
+                    f"Cuota agotada en {etiqueta} (HTTP 429).\n"
+                    f"  La capa gratuita limita el numero de peticiones. Opciones:\n"
+                    f"    - esperar a que se renueve la cuota\n"
+                    f"    - probar otro modelo con --model\n"
+                    f"    - cambiar de proveedor con --provider\n"
+                    f"  Detalle: {detalle[:300]}")
+
+            raise RuntimeError(f"Error HTTP {exc.code} de {etiqueta}: {detalle[:500]}")
+
+        except urllib.error.URLError as exc:
+            if intento < REINTENTOS:
+                print(f"  ({etiqueta}: sin conexion. "
+                      f"Reintento {intento} de {REINTENTOS - 1} en {espera:.0f} s...)")
+                time.sleep(espera)
+                espera *= 2
+                continue
+            raise RuntimeError(f"No se pudo contactar {etiqueta}: {exc.reason}")
+
+    raise RuntimeError(f"{etiqueta} no respondio tras {REINTENTOS} intentos.")
 
 
 class ProveedorLLM:

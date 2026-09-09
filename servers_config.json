@@ -19,9 +19,8 @@
       "_descripcion": "El mismo servidor desplegado en la nube (punto 6). Remoto, HTTP.",
       "_nota": "Reemplace la URL por la de su servicio en Cloud Run y quite 'disabled'.",
       "transport": "http",
-      "url": "https://SU-SERVICIO.run.app/mcp",
-      "timeout": 30,
-      "disabled": true
+      "url": "https://mcp-distribuidora-787185777364.us-central1.run.app/mcp",
+      "timeout": 30
     },
 
     "filesystem": {
